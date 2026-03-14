@@ -9,12 +9,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/nicholasgasior/aurora-linux/lib/consumer/ioc"
-	"github.com/nicholasgasior/aurora-linux/lib/consumer/sigma"
-	"github.com/nicholasgasior/aurora-linux/lib/distributor"
-	"github.com/nicholasgasior/aurora-linux/lib/enrichment"
-	"github.com/nicholasgasior/aurora-linux/lib/provider"
-	"github.com/nicholasgasior/aurora-linux/lib/provider/replay"
+	"github.com/Nextron-Labs/aurora-linux/lib/consumer/ioc"
+	"github.com/Nextron-Labs/aurora-linux/lib/consumer/sigma"
+	"github.com/Nextron-Labs/aurora-linux/lib/distributor"
+	"github.com/Nextron-Labs/aurora-linux/lib/enrichment"
+	"github.com/Nextron-Labs/aurora-linux/lib/provider"
+	"github.com/Nextron-Labs/aurora-linux/lib/provider/replay"
 	log "github.com/sirupsen/logrus"
 )
 
