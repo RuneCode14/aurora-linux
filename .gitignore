@@ -40,3 +40,5 @@ go.work.sum
 lib/provider/ebpf/bpf/headers/
 lib/provider/ebpf/*_bpfel.go
 lib/provider/ebpf/*_bpfel.o
+aurora-arm64
+aurora-util-arm64

@@ -49,6 +49,14 @@ type signaturesOptions struct {
 	AssetName    string
 	GitHubToken  string
 	DryRun       bool
+
+	// IOC update options
+	IOCRepo      string
+	IOCVersion   string
+	IOCDir       string
+	IOCSubdir    string
+	SkipSigma    bool
+	SkipIOCs     bool
 }
 
 type upgradeOptions struct {
@@ -81,7 +89,7 @@ func main() {
 	var sigOpts signaturesOptions
 	sigCmd := &cobra.Command{
 		Use:   "update-signatures",
-		Short: "Update Sigma Linux signatures from GitHub releases",
+		Short: "Update all signatures (Sigma rules + IOCs) from GitHub releases",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			if ctx == nil {
@@ -90,13 +98,21 @@ func main() {
 			return runUpdateSignatures(ctx, sigOpts)
 		},
 	}
-	sigCmd.Flags().StringVar(&sigOpts.Repo, "repo", "SigmaHQ/sigma", "GitHub repository in owner/repo format")
-	sigCmd.Flags().StringVar(&sigOpts.Version, "version", "latest", "Release tag to fetch (or \"latest\")")
+	sigCmd.Flags().StringVar(&sigOpts.Repo, "repo", "SigmaHQ/sigma", "GitHub repository for Sigma rules (owner/repo)")
+	sigCmd.Flags().StringVar(&sigOpts.Version, "version", "latest", "Sigma release tag to fetch (or \"latest\")")
 	sigCmd.Flags().StringVar(&sigOpts.RulesDir, "rules-dir", "/opt/aurora-linux/sigma-rules/rules/linux", "Destination directory for Linux Sigma rules")
-	sigCmd.Flags().StringVar(&sigOpts.SourceSubdir, "source-subdir", "rules/linux", "Subdirectory inside the release archive to install")
-	sigCmd.Flags().StringVar(&sigOpts.AssetName, "asset", "", "Optional explicit release asset name")
+	sigCmd.Flags().StringVar(&sigOpts.SourceSubdir, "source-subdir", "rules/linux", "Subdirectory inside the Sigma release archive to install")
+	sigCmd.Flags().StringVar(&sigOpts.AssetName, "asset", "", "Optional explicit Sigma release asset name")
 	sigCmd.Flags().StringVar(&sigOpts.GitHubToken, "github-token", "", "Optional GitHub API token (defaults to GITHUB_TOKEN env)")
 	sigCmd.Flags().BoolVar(&sigOpts.DryRun, "dry-run", false, "Print actions without writing changes")
+
+	// IOC options
+	sigCmd.Flags().StringVar(&sigOpts.IOCRepo, "iocs-repo", "Neo23x0/signature-base", "GitHub repository for IOCs (owner/repo)")
+	sigCmd.Flags().StringVar(&sigOpts.IOCVersion, "iocs-version", "latest", "IOC release tag to fetch (or \"latest\")")
+	sigCmd.Flags().StringVar(&sigOpts.IOCDir, "iocs-dir", "/opt/aurora-linux/resources/iocs", "Destination directory for IOC files")
+	sigCmd.Flags().StringVar(&sigOpts.IOCSubdir, "iocs-subdir", "iocs", "Subdirectory inside the IOC release archive to extract")
+	sigCmd.Flags().BoolVar(&sigOpts.SkipSigma, "skip-sigma", false, "Skip Sigma rule update (IOCs only)")
+	sigCmd.Flags().BoolVar(&sigOpts.SkipIOCs, "skip-iocs", false, "Skip IOC update (Sigma rules only)")
 
 	var upOpts upgradeOptions
 	upgradeCmd := &cobra.Command{
@@ -147,9 +163,51 @@ func main() {
 }
 
 func runUpdateSignatures(ctx context.Context, opts signaturesOptions) error {
-	client := &http.Client{Timeout: defaultHTTPTimeout}
+	if opts.SkipSigma && opts.SkipIOCs {
+		return fmt.Errorf("cannot use --skip-sigma and --skip-iocs together")
+	}
 
-	release, err := fetchRelease(ctx, client, opts.Repo, opts.Version, resolveToken(opts.GitHubToken))
+	client := &http.Client{Timeout: defaultHTTPTimeout}
+	token := resolveToken(opts.GitHubToken)
+	var sigmaErr, iocErr error
+
+	// --- Sigma rules ---
+	if !opts.SkipSigma {
+		sigmaErr = updateSigmaRules(ctx, client, token, opts)
+		if sigmaErr != nil {
+			fmt.Fprintf(os.Stderr, "Sigma update failed: %v\n", sigmaErr)
+		}
+	} else {
+		fmt.Println("Skipping Sigma rule update (--skip-sigma)")
+	}
+
+	// --- IOCs ---
+	if !opts.SkipIOCs {
+		iocErr = updateIOCs(ctx, client, token, opts)
+		if iocErr != nil {
+			fmt.Fprintf(os.Stderr, "IOC update failed: %v\n", iocErr)
+		}
+	} else {
+		fmt.Println("Skipping IOC update (--skip-iocs)")
+	}
+
+	// Report combined result
+	if sigmaErr != nil && iocErr != nil {
+		return fmt.Errorf("both updates failed: sigma: %v; iocs: %v", sigmaErr, iocErr)
+	}
+	if sigmaErr != nil {
+		return fmt.Errorf("sigma update failed: %w", sigmaErr)
+	}
+	if iocErr != nil {
+		return fmt.Errorf("ioc update failed: %w", iocErr)
+	}
+	return nil
+}
+
+func updateSigmaRules(ctx context.Context, client *http.Client, token string, opts signaturesOptions) error {
+	fmt.Println("--- Updating Sigma rules ---")
+
+	release, err := fetchRelease(ctx, client, opts.Repo, opts.Version, token)
 	if err != nil {
 		return err
 	}
@@ -166,7 +224,7 @@ func runUpdateSignatures(ctx context.Context, opts signaturesOptions) error {
 	defer os.RemoveAll(tmpDir)
 
 	archivePath := filepath.Join(tmpDir, "sigma-release"+archiveSuffix(archiveLabel))
-	if err := downloadFile(ctx, client, archiveURL, resolveToken(opts.GitHubToken), archivePath); err != nil {
+	if err := downloadFile(ctx, client, archiveURL, token, archivePath); err != nil {
 		return err
 	}
 
@@ -195,6 +253,72 @@ func runUpdateSignatures(ctx context.Context, opts signaturesOptions) error {
 	fmt.Printf("Updated Sigma rules in %s\n", opts.RulesDir)
 	if backupPath != "" {
 		fmt.Printf("Previous rules backup: %s\n", backupPath)
+	}
+	if metadataPath != "" {
+		fmt.Printf("Updated metadata: %s\n", metadataPath)
+	}
+
+	return nil
+}
+
+func updateIOCs(ctx context.Context, client *http.Client, token string, opts signaturesOptions) error {
+	fmt.Println("--- Updating IOCs ---")
+
+	release, err := fetchRelease(ctx, client, opts.IOCRepo, opts.IOCVersion, token)
+	if err != nil {
+		return err
+	}
+
+	archiveURL, archiveLabel, err := selectSignatureArchive(release, "")
+	if err != nil {
+		return err
+	}
+
+	tmpDir, err := os.MkdirTemp("", "aurora-util-iocs-*")
+	if err != nil {
+		return fmt.Errorf("creating temp dir: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	archivePath := filepath.Join(tmpDir, "iocs-release"+archiveSuffix(archiveLabel))
+	if err := downloadFile(ctx, client, archiveURL, token, archivePath); err != nil {
+		return err
+	}
+
+	stagedIOCs := filepath.Join(tmpDir, "iocs")
+	filesWritten, err := extractSubdirFromArchive(archivePath, opts.IOCSubdir, stagedIOCs)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Prepared %d IOC files from %s (%s)\n", filesWritten, release.TagName, archiveLabel)
+	if opts.DryRun {
+		fmt.Printf("[dry-run] Would replace %s\n", opts.IOCDir)
+		return nil
+	}
+
+	backupPath, err := replaceDirectoryWithBackup(stagedIOCs, opts.IOCDir)
+	if err != nil {
+		return err
+	}
+
+	// Write IOC source metadata
+	metadataPath := filepath.Join(opts.IOCDir, "SOURCE.txt")
+	metadataContent := fmt.Sprintf(
+		"repo=https://github.com/%s\nrelease=%s\narchive=%s\nupdated_at=%s\n",
+		opts.IOCRepo,
+		release.TagName,
+		archiveURL,
+		time.Now().UTC().Format(time.RFC3339),
+	)
+	if writeErr := os.WriteFile(metadataPath, []byte(metadataContent), 0o644); writeErr != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to write IOC SOURCE metadata: %v\n", writeErr)
+		metadataPath = ""
+	}
+
+	fmt.Printf("Updated IOCs in %s\n", opts.IOCDir)
+	if backupPath != "" {
+		fmt.Printf("Previous IOCs backup: %s\n", backupPath)
 	}
 	if metadataPath != "" {
 		fmt.Printf("Updated metadata: %s\n", metadataPath)
@@ -514,7 +638,15 @@ func downloadFile(ctx context.Context, client *http.Client, downloadURL, token, 
 	if err != nil {
 		return fmt.Errorf("creating download request: %w", err)
 	}
-	req.Header.Set("Accept", "application/octet-stream")
+	// GitHub API tarball/zipball endpoints require a JSON-compatible accept
+	// header and respond with a 302 redirect to the actual archive.
+	// Release asset URLs need application/octet-stream. We detect the
+	// difference by checking whether the URL is a GitHub API URL.
+	if strings.Contains(downloadURL, "api.github.com") {
+		req.Header.Set("Accept", "application/vnd.github+json")
+	} else {
+		req.Header.Set("Accept", "application/octet-stream")
+	}
 	req.Header.Set("User-Agent", "aurora-util")
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
