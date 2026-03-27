@@ -28,6 +28,10 @@ const (
 
 var version = "dev"
 
+// githubAPIBase is the base URL for the GitHub API. Tests override this
+// to point at an httptest server.
+var githubAPIBase = "https://api.github.com"
+
 type githubRelease struct {
 	TagName    string               `json:"tag_name"`
 	Name       string               `json:"name"`
@@ -512,7 +516,7 @@ func fetchRelease(ctx context.Context, client *http.Client, repo, version, token
 }
 
 func releaseEndpoint(repo, version string) string {
-	base := "https://api.github.com/repos/" + repo + "/releases"
+	base := githubAPIBase + "/repos/" + repo + "/releases"
 	if strings.EqualFold(strings.TrimSpace(version), "latest") || strings.TrimSpace(version) == "" {
 		return base + "/latest"
 	}
